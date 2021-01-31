@@ -2,6 +2,7 @@
 //! GPU drawing.
 
 use std::cmp::min;
+use std::cmp::max;
 use std::f64;
 use std::fmt::{self, Formatter};
 #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
@@ -206,6 +207,11 @@ impl Display {
         debug!("Estimated window size: {:?}", estimated_size);
         debug!("Estimated cell size: {} x {}", cell_width, cell_height);
 
+        // Calculate dimensions for window initialization and clearing.
+        let min_dimensions = Self::calculate_min_dimensions(event_loop);
+        let clr_dimensions = Self::calculate_clr_dimensions(estimated_size, min_dimensions);
+        debug!("Initialization Dimensions: {:?}", clr_dimensions);
+
         #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
         let mut wayland_event_queue = None;
 
@@ -220,7 +226,7 @@ impl Display {
         let mut window = Window::new(
             event_loop,
             &config,
-            estimated_size,
+            clr_dimensions,
             #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
             wayland_event_queue.as_ref(),
         )?;
@@ -233,12 +239,12 @@ impl Display {
         let (glyph_cache, cell_width, cell_height) =
             Self::new_glyph_cache(window.dpr, &mut renderer, config)?;
 
-        if let Some(dimensions) = dimensions {
+        if dimensions.is_some() {
             if (estimated_dpr - window.dpr).abs() < f64::EPSILON {
                 info!("Estimated DPR correctly, skipping resize");
             } else {
                 // Resize the window again if the DPR was not estimated correctly.
-                let size = window_size(config, dimensions, cell_width, cell_height, window.dpr);
+                let size = clr_dimensions.unwrap();
                 window.set_inner_size(size);
             }
         }
@@ -293,6 +299,15 @@ impl Display {
             });
         }
 
+        // Resize the window to our preferred size, if specified.
+        if let Some(estimated_phy_size) = estimated_size {
+            window.set_inner_size(estimated_phy_size);
+        } else {
+            // Resize to winit's default window size in case
+            // none are specified.
+            window.set_inner_size(PhysicalSize::new(800, 600));
+        }
+
         window.set_visible(true);
 
         // Set window position.
@@ -329,6 +344,69 @@ impl Display {
             visual_bell: VisualBell::from(&config.ui_config.bell),
             colors: List::from(&config.ui_config.colors),
         })
+    }
+
+    fn calculate_min_dimensions<E>(
+        event_loop: &EventLoop<E>
+    ) -> Option<PhysicalSize<u32>> {
+        let mut monitors = event_loop.available_monitors();
+        let mut width;
+        let mut height;
+
+        // Use the first monitor to get an initial value
+        // for width and height.
+        if let Some(first_monitor) = monitors.next() {
+            width = first_monitor.size().width;
+            height = first_monitor.size().height;
+        } else {
+            // This should never happen, but we return `None`
+            // if the first monitor does not exist.
+            debug!("Minimum dimensions could not be found!");
+            return None;
+        }
+
+        // Compare width and height to all remaining
+        // monitors until we get the highest values.
+        for monitor in monitors {
+            let new_width = monitor.size().width;
+            let new_height = monitor.size().height;
+
+            if new_width > width {
+                width = new_width;
+            }
+
+            if new_height > height {
+                height = new_height;
+            }
+        }
+
+        Some(PhysicalSize::new(width as u32, height as u32))
+    }
+
+    fn calculate_clr_dimensions(
+        est_dimensions: Option<PhysicalSize<u32>>,
+        min_dimensions: Option<PhysicalSize<u32>>
+    ) -> Option<PhysicalSize<u32>> {
+        // Extract the width and height for each set of dimensions.
+        //
+        // Dimensions will evaluate to `None` when there are no dimensions
+        // found, or not specified in the configuration file. We handle these
+        // situations by defaulting to winit's default window size.
+        let (est_width, est_height) = if let Some(est_phy_dimensions) = est_dimensions {
+            (est_phy_dimensions.width, est_phy_dimensions.height)
+        } else {
+            (800, 600)
+        };
+        let (min_width, min_height) = if let Some(min_phy_dimensions) = min_dimensions {
+            (min_phy_dimensions.width, min_phy_dimensions.height)
+        } else {
+            (800, 600)
+        };
+
+        let width = max(est_width, min_width);
+        let height = max(est_height, min_height);
+
+        Some(PhysicalSize::new(width as u32, height as u32))
     }
 
     fn new_glyph_cache(
